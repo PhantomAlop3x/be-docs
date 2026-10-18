@@ -635,5 +635,6 @@ button, select, input { font-family: inherit; }
     min-height: 0;
     margin: 0;
     padding: 0;
+    caret-color: transparent;
   }
 }
