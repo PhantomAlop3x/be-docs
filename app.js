@@ -51,6 +51,14 @@
     image:
       '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="m21 16-5-5L5 20"/>',
     video: '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 11 5-3v8l-5-3z"/>',
+    layoutInline: '<path d="M3 5h18M3 19h18"/><rect x="8" y="9" width="8" height="6" rx="1"/>',
+    layoutLeft: '<rect x="3" y="5" width="7" height="7" rx="1"/><path d="M13 6h8M13 10h8M3 16h18M3 20h18"/>',
+    layoutRight: '<rect x="14" y="5" width="7" height="7" rx="1"/><path d="M3 6h8M3 10h8M3 16h18M3 20h18"/>',
+    layoutBehind:
+      '<rect x="7" y="5" width="10" height="14" rx="1" stroke-dasharray="2.5 2.5"/><path d="M3 9h18M3 12h18M3 15h18"/>',
+    layoutFront:
+      '<path d="M3 9h18M3 15h18"/><rect x="7" y="5" width="10" height="14" rx="1" style="fill: var(--chrome)"/>',
+    trash: '<path d="M4 7h16M10 7V4h4v3M6 7l1 13h10l1-13"/>',
   };
 
   function svg(name, size = 18) {
@@ -133,6 +141,7 @@
     updateStatus();
     refreshToolbar();
     queueOutline();
+    refreshObjectUI();
   }
 
   function exec(cmd, value = null) {
@@ -202,14 +211,28 @@
   ]);
   const TAG_ATTRS = {
     A: ["href", "title"],
-    IMG: ["src", "alt", "width", "height"],
-    VIDEO: ["src", "controls", "width", "height", "loop", "muted", "preload", "playsinline"],
+    IMG: ["src", "alt", "width", "height", "data-layout"],
+    VIDEO: ["src", "controls", "width", "height", "loop", "muted", "preload", "playsinline", "data-layout"],
     SOURCE: ["src", "type"],
   };
   const ALLOWED_STYLES = new Set([
     "text-align", "line-height", "margin-top", "margin-bottom", "color", "background-color",
     "font-size", "font-family", "font-weight", "font-style", "text-decoration",
   ]);
+
+  const LAYOUT_VALUES = new Set(["wrap-left", "wrap-right", "behind", "front"]);
+
+  // Images and video only keep a pixel width and the two position variables from their style
+  function cleanMediaStyle(text) {
+    const out = [];
+    const w = /(?:^|;)\s*width\s*:\s*(\d+(?:\.\d+)?)px\s*(?=;|$)/i.exec(text);
+    if (w && +w[1] >= 1 && +w[1] <= 5000) out.push("width: " + w[1] + "px");
+    ["x", "y"].forEach((axis) => {
+      const m = new RegExp("(?:^|;)\\s*--" + axis + "\\s*:\\s*(-?\\d+(?:\\.\\d+)?)px\\s*(?=;|$)", "i").exec(text);
+      if (m && Math.abs(+m[1]) <= 20000) out.push("--" + axis + ": " + m[1] + "px");
+    });
+    return out.join("; ");
+  }
 
   function isSafeUrl(name, value) {
     const v = value.trim();
@@ -237,7 +260,11 @@
       }
       [...child.attributes].forEach((a) => {
         const name = a.name.toLowerCase();
-        if (name === "style") {
+        if (name === "style" && (tag === "IMG" || tag === "VIDEO")) {
+          const cleaned = cleanMediaStyle(a.value);
+          if (cleaned) child.setAttribute("style", cleaned);
+          else child.removeAttribute("style");
+        } else if (name === "style") {
           const kept = [];
           for (const prop of child.style) {
             const val = child.style.getPropertyValue(prop);
@@ -251,6 +278,7 @@
           if (!(tag === "H1" && a.value === "title")) child.removeAttribute("class");
         } else if ((TAG_ATTRS[tag] || []).includes(name)) {
           if ((name === "src" || name === "href") && !isSafeUrl(name, a.value)) child.removeAttribute(a.name);
+          if (name === "data-layout" && !LAYOUT_VALUES.has(a.value)) child.removeAttribute(a.name);
         } else {
           child.removeAttribute(a.name);
         }
@@ -492,7 +520,29 @@
     afterChange();
   }
 
-  let lastVideoInsert = null;
+  const DEFAULT_MEDIA_WIDTH = 480;
+
+  const LAYOUTS = [
+    { id: "inline", label: "In line with text", icon: "layoutInline" },
+    { id: "wrap-left", label: "Wrap text around, object on the left", icon: "layoutLeft" },
+    { id: "wrap-right", label: "Wrap text around, object on the right", icon: "layoutRight" },
+    { id: "behind", label: "Behind text, free position", icon: "layoutBehind" },
+    { id: "front", label: "In front of text, free position", icon: "layoutFront" },
+  ];
+
+  const SIZE_PRESETS = [
+    ["25% of width", 0.25],
+    ["50% of width", 0.5],
+    ["75% of width", 0.75],
+    ["Full width", 1],
+    ["Original size", "original"],
+  ];
+
+  let selectedMedia = null;
+
+  // Changes the browser's own undo history does not know about (inserted video, image layout,
+  // size and position). They can be undone one by one until the next time the user types.
+  const undoStack = [];
 
   function topLevelBlock(node) {
     let n = node && (node.nodeType === 1 ? node : node.parentNode);
@@ -509,7 +559,9 @@
     const block = prior ? topLevelBlock(prior.startContainer) : null;
 
     const holder = document.createElement("p");
-    holder.innerHTML = '<video src="' + src + '" controls preload="metadata" playsinline></video>';
+    holder.innerHTML =
+      '<video src="' + src + '" controls preload="metadata" playsinline style="width: ' +
+      DEFAULT_MEDIA_WIDTH + 'px"></video>';
 
     let caretBlock;
     let nodes;
@@ -532,31 +584,43 @@
     sel.addRange(r);
     holder.scrollIntoView({ block: "nearest" });
 
-    lastVideoInsert = { nodes, prior };
+    undoStack.push(() => {
+      if (!nodes[0].isConnected) return false;
+      nodes.forEach((n) => n.remove());
+      ensureContent();
+      if (prior && editor.contains(prior.startContainer)) {
+        const s = window.getSelection();
+        s.removeAllRanges();
+        s.addRange(prior);
+      }
+      return true;
+    });
     afterChange();
   }
 
-  // The browser's undo history does not know about the video block, so undo is handled here
-  // for as long as nothing else has been edited since the video was inserted
-  function undoVideoInsert() {
-    if (!lastVideoInsert) return false;
-    const { nodes, prior } = lastVideoInsert;
-    lastVideoInsert = null;
-    if (!nodes[0].isConnected) return false;
-    nodes.forEach((n) => n.remove());
-    ensureContent();
-    if (prior && editor.contains(prior.startContainer)) {
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(prior);
+  function undoSpecial() {
+    while (undoStack.length) {
+      const undo = undoStack.pop();
+      if (undo()) {
+        afterChange();
+        return true;
+      }
     }
-    afterChange();
-    return true;
+    return false;
   }
 
   editor.addEventListener("beforeinput", (e) => {
-    if (e.inputType === "historyUndo" && undoVideoInsert()) e.preventDefault();
+    if (e.inputType === "historyUndo" && undoSpecial()) e.preventDefault();
   });
+
+  function imageSize(src) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+      img.onerror = () => resolve({ w: 0, h: 0 });
+      img.src = src;
+    });
+  }
 
   async function insertMedia(file) {
     const isImage = file.type.startsWith("image/");
@@ -587,7 +651,9 @@
       insertVideoBlock(src);
     } else {
       const label = escapeAttr(file.name.replace(/\.[^.]+$/, ""));
-      insertHtml('<img src="' + src + '" alt="' + label + '">');
+      const size = await imageSize(src);
+      const width = Math.min(size.w || DEFAULT_MEDIA_WIDTH, DEFAULT_MEDIA_WIDTH);
+      insertHtml('<img src="' + src + '" alt="' + label + '" style="width: ' + width + 'px">');
     }
   }
 
@@ -619,31 +685,53 @@
   const imageInput = makePicker("image/*", true);
   const videoInput = makePicker("video/*", false);
 
-  // Highlight an image or video when it is the current selection
+  // Track the image or video that is currently selected
   function updateMediaSelection(range) {
-    editor.querySelectorAll(".media-selected").forEach((n) => n.classList.remove("media-selected"));
-    if (!range || range.collapsed) return;
-    if (range.startContainer !== range.endContainer || range.endOffset - range.startOffset !== 1) return;
-    const node = range.startContainer.childNodes[range.startOffset];
-    if (node && node.nodeType === 1 && (node.tagName === "IMG" || node.tagName === "VIDEO")) {
-      node.classList.add("media-selected");
+    let found = null;
+    if (range && !range.collapsed && range.startContainer === range.endContainer && range.endOffset - range.startOffset === 1) {
+      const node = range.startContainer.childNodes[range.startOffset];
+      if (node && node.nodeType === 1 && (node.tagName === "IMG" || node.tagName === "VIDEO")) found = node;
     }
+    editor.querySelectorAll(".media-selected").forEach((n) => {
+      if (n !== found) n.classList.remove("media-selected");
+    });
+    if (found) found.classList.add("media-selected");
+    selectedMedia = found;
+    refreshObjectUI();
   }
 
-  // Clicking an image or video selects it, so it can be deleted or aligned
-  editor.addEventListener("click", (e) => {
-    const t = e.target;
-    const isImg = t.tagName === "IMG";
-    const isVideo = t.tagName === "VIDEO";
-    if (!isImg && !isVideo) return;
-    // Leave the bottom strip of a video alone so its play controls keep working
-    if (isVideo && t.getBoundingClientRect().bottom - e.clientY < 44) return;
+  function selectMedia(m) {
     const r = document.createRange();
-    r.selectNode(t);
+    r.selectNode(m);
     const sel = window.getSelection();
     sel.removeAllRanges();
     sel.addRange(r);
-    if (isVideo) e.preventDefault();
+    savedRange = r.cloneRange();
+    updateMediaSelection(r);
+  }
+
+  const isMedia = (n) => n && (n.tagName === "IMG" || n.tagName === "VIDEO");
+
+  // Objects set to "behind text" sit under the text, so Ctrl/Cmd + click picks them
+  function behindMediaAt(x, y) {
+    return [...editor.querySelectorAll('[data-layout="behind"]')].reverse().find((m) => {
+      const r = m.getBoundingClientRect();
+      return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    });
+  }
+
+  // Clicking an image or video selects it, so it can be moved, resized, deleted or aligned
+  editor.addEventListener("click", (e) => {
+    let t = e.target;
+    if ((e.ctrlKey || e.metaKey) && !isMedia(t)) {
+      const hit = behindMediaAt(e.clientX, e.clientY);
+      if (hit) t = hit;
+    }
+    if (!isMedia(t)) return;
+    // Leave the bottom strip of a video alone so its play controls keep working
+    if (t.tagName === "VIDEO" && t.getBoundingClientRect().bottom - e.clientY < 44) return;
+    selectMedia(t);
+    e.preventDefault();
   });
 
   function mediaFilesFrom(dataTransfer) {
@@ -718,7 +806,7 @@
   const run = {
     undo: () => {
       focusEditor();
-      if (!undoVideoInsert()) exec("undo");
+      if (!undoSpecial()) exec("undo");
     },
     redo: () => exec("redo"),
     cut: () => exec("cut"),
@@ -854,6 +942,20 @@
         item("Strikethrough", run.strike),
         sep,
         item("Clear formatting", run.clear),
+        sep,
+        head("Image and video layout"),
+        ...LAYOUTS.map((L) => ({
+          label: L.label,
+          run: () => selectedMedia && setLayout(selectedMedia, L.id),
+          enabled: () => !!selectedMedia,
+        })),
+        sep,
+        head("Image and video size"),
+        ...SIZE_PRESETS.map(([label, value]) => ({
+          label,
+          run: () => selectedMedia && applySizePreset(selectedMedia, value),
+          enabled: () => !!selectedMedia,
+        })),
       ],
     },
     {
@@ -937,6 +1039,7 @@
           note.textContent = it.note;
           b.appendChild(note);
         }
+        if (it.enabled) it.btnEl = b;
         if (it.disabled) {
           b.disabled = true;
         } else {
@@ -965,6 +1068,7 @@
     closeMenus();
     menuDefs[i].items.forEach((it) => {
       if (it.labelEl) it.labelEl.textContent = it.label();
+      if (it.btnEl) it.btnEl.disabled = !it.enabled();
     });
     menus[i].list.hidden = false;
     menus[i].btn.classList.add("open");
@@ -1144,7 +1248,7 @@
     outlineBody.textContent = "";
     if (!tree.length) {
       const p = el("p", "outline-empty");
-      p.textContent = "Add a title or heading to your document and it will appear here.";
+      p.textContent = "Add a title or headings to your document and they will appear here for quick jumping.";
       outlineBody.appendChild(p);
       return;
     }
@@ -1254,6 +1358,469 @@
     renderOutline();
   })();
 
+  /* ---------- Object layout, size and position ---------- */
+
+  const MIN_SIZE = 40;
+  const SNAP_DISTANCE = 6;
+
+  const layoutOf = (m) => m.getAttribute("data-layout") || "inline";
+  const isPositioned = (m) => layoutOf(m) === "behind" || layoutOf(m) === "front";
+
+  function setAttr(node, name, value) {
+    if (value === null || value === undefined) node.removeAttribute(name);
+    else node.setAttribute(name, value);
+  }
+
+  function snapshotMedia(m) {
+    return { m, layout: m.getAttribute("data-layout"), style: m.getAttribute("style") };
+  }
+
+  function restoreMedia(snap) {
+    if (!snap.m.isConnected) return false;
+    setAttr(snap.m, "data-layout", snap.layout);
+    setAttr(snap.m, "style", snap.style);
+    return true;
+  }
+
+  // Remember the previous state so the change can be undone
+  function recordMediaChange(before) {
+    const now = snapshotMedia(before.m);
+    if (now.layout === before.layout && now.style === before.style) return;
+    undoStack.push(() => restoreMedia(before));
+    afterChange();
+  }
+
+  function contentWidth() {
+    const cs = getComputedStyle(editor);
+    return editor.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  }
+
+  // Which edge of the object stays put when its width changes
+  function mediaAlignment(m) {
+    const layout = layoutOf(m);
+    if (layout === "wrap-left") return "left";
+    if (layout === "wrap-right") return "right";
+    const block = getBlock(m);
+    const a = block ? getComputedStyle(block).textAlign : "left";
+    if (a === "center") return "center";
+    if (a === "right" || a === "end") return "right";
+    return "left";
+  }
+
+  function setLayout(m, layout) {
+    if (layoutOf(m) === layout) return;
+    const before = snapshotMedia(m);
+    const wasFree = isPositioned(m);
+    const goingFree = layout === "behind" || layout === "front";
+
+    // Keep the object where it is on screen when it becomes freely positioned
+    let x = 0;
+    let y = 0;
+    if (goingFree && !wasFree) {
+      const r = m.getBoundingClientRect();
+      const a = (m.offsetParent || editor).getBoundingClientRect();
+      x = Math.round(r.left - a.left);
+      y = Math.round(r.top - a.top);
+    }
+
+    if (layout === "inline") m.removeAttribute("data-layout");
+    else m.setAttribute("data-layout", layout);
+
+    if (!goingFree) {
+      m.style.removeProperty("--x");
+      m.style.removeProperty("--y");
+      if (!m.getAttribute("style")) m.removeAttribute("style");
+    } else if (!wasFree) {
+      m.style.setProperty("--x", x + "px");
+      m.style.setProperty("--y", y + "px");
+      // A paragraph holding only a free object would collapse, so give it a line to stay editable
+      const block = getBlock(m);
+      if (block && !block.textContent.trim() && !block.querySelector("br")) {
+        block.appendChild(document.createElement("br"));
+      }
+    }
+
+    recordMediaChange(before);
+    refreshObjectUI();
+  }
+
+  function applySizePreset(m, preset) {
+    const before = snapshotMedia(m);
+    let w;
+    if (preset === "original") {
+      w = m.tagName === "IMG" ? m.naturalWidth : m.videoWidth;
+    } else {
+      w = Math.round(contentWidth() * preset);
+    }
+    w = Math.max(MIN_SIZE, w || DEFAULT_MEDIA_WIDTH);
+    m.style.width = w + "px";
+    recordMediaChange(before);
+    refreshObjectUI();
+  }
+
+  /* --- Selection frame, resize handles and the small toolbar --- */
+
+  const ui = el("div");
+  ui.id = "obj-ui";
+  ui.hidden = true;
+  canvas.appendChild(ui);
+
+  const guides = el("div", "obj-guides");
+  const frame = el("div", "obj-frame");
+  const moveSurface = el("div", "obj-move");
+  const bar = el("div", "obj-bar");
+  const chip = el("div", "snap-chip");
+  chip.hidden = true;
+  frame.appendChild(moveSurface);
+  ui.append(guides, frame, bar);
+  document.body.appendChild(chip);
+
+  const handleEls = {};
+  ["nw", "ne", "sw", "se"].forEach((corner) => {
+    const h = el("div", "obj-handle h-" + corner);
+    h.addEventListener("pointerdown", (e) => startResize(e, corner));
+    frame.appendChild(h);
+    handleEls[corner] = h;
+  });
+
+  bar.setAttribute("role", "toolbar");
+  bar.setAttribute("aria-label", "Image and video options");
+
+  LAYOUTS.forEach((L) => {
+    const b = el("button", "tb small");
+    b.type = "button";
+    b.title = L.label;
+    b.setAttribute("aria-label", L.label);
+    b.dataset.layout = L.id;
+    b.innerHTML = svg(L.icon, 16);
+    b.addEventListener("click", () => selectedMedia && setLayout(selectedMedia, L.id));
+    bar.appendChild(b);
+  });
+
+  bar.appendChild(el("span", "bar-sep"));
+
+  const sizeSelect = el("select", "tb-select");
+  sizeSelect.title = "Size";
+  sizeSelect.setAttribute("aria-label", "Size");
+  const placeholder = el("option");
+  placeholder.value = "";
+  placeholder.textContent = "Size";
+  sizeSelect.appendChild(placeholder);
+  SIZE_PRESETS.forEach(([label, value]) => {
+    const o = el("option");
+    o.value = String(value);
+    o.textContent = label;
+    sizeSelect.appendChild(o);
+  });
+  sizeSelect.addEventListener("change", () => {
+    const v = sizeSelect.value;
+    sizeSelect.value = "";
+    if (!v || !selectedMedia) return;
+    applySizePreset(selectedMedia, v === "original" ? v : parseFloat(v));
+  });
+  bar.appendChild(sizeSelect);
+
+  bar.appendChild(el("span", "bar-sep"));
+
+  const deleteBtn = el("button", "tb small");
+  deleteBtn.type = "button";
+  deleteBtn.title = "Delete";
+  deleteBtn.setAttribute("aria-label", "Delete");
+  deleteBtn.innerHTML = svg("trash", 16);
+  deleteBtn.addEventListener("click", () => selectedMedia && exec("delete"));
+  bar.appendChild(deleteBtn);
+
+  // Keep the selection while using the frame and toolbar (the size list needs normal focus)
+  bar.addEventListener("mousedown", (e) => {
+    if (!e.target.closest("select")) e.preventDefault();
+  });
+  frame.addEventListener("mousedown", (e) => e.preventDefault());
+
+  function refreshObjectUI() {
+    const m = selectedMedia;
+    if (!m || !m.isConnected) {
+      ui.hidden = true;
+      return;
+    }
+    ui.hidden = false;
+
+    const cr = canvas.getBoundingClientRect();
+    const r = m.getBoundingClientRect();
+    const x = r.left - cr.left + canvas.scrollLeft;
+    const y = r.top - cr.top + canvas.scrollTop;
+    frame.style.left = x + "px";
+    frame.style.top = y + "px";
+    frame.style.width = r.width + "px";
+    frame.style.height = r.height + "px";
+
+    // Only show the handles that stay under the pointer while resizing
+    const positioned = isPositioned(m);
+    const side = positioned ? "center" : mediaAlignment(m);
+    const show = side === "center" ? ["nw", "ne", "sw", "se"] : side === "left" ? ["ne", "se"] : ["nw", "sw"];
+    Object.keys(handleEls).forEach((c) => {
+      handleEls[c].style.display = show.includes(c) ? "" : "none";
+    });
+
+    // Free objects can be dragged by their frame (video keeps its play controls clear)
+    moveSurface.style.display = positioned ? "" : "none";
+    moveSurface.style.bottom = positioned && m.tagName === "VIDEO" ? "44px" : "0";
+
+    bar.querySelectorAll("[data-layout]").forEach((b) => {
+      b.classList.toggle("active", b.dataset.layout === layoutOf(m));
+    });
+
+    // The toolbar sits above the object, or below it, or pinned to the top of the view
+    const barH = bar.offsetHeight;
+    let top = y - barH - 10;
+    if (top < canvas.scrollTop + 8) {
+      const below = y + r.height + 10;
+      top = below + barH <= canvas.scrollTop + canvas.clientHeight - 8 ? below : canvas.scrollTop + 8;
+    }
+    const maxLeft = canvas.scrollLeft + canvas.clientWidth - bar.offsetWidth - 8;
+    bar.style.top = top + "px";
+    bar.style.left = Math.max(8, Math.min(x, maxLeft)) + "px";
+  }
+
+  canvas.addEventListener("scroll", () => {
+    if (selectedMedia) refreshObjectUI();
+  }, { passive: true });
+
+  new ResizeObserver(() => refreshObjectUI()).observe(editor);
+  editor.addEventListener("load", refreshObjectUI, true);
+  editor.addEventListener("loadedmetadata", refreshObjectUI, true);
+
+  /* --- Resizing --- */
+
+  function startResize(e, corner) {
+    const m = selectedMedia;
+    if (!m || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const before = snapshotMedia(m);
+    const r0 = m.getBoundingClientRect();
+    const positioned = isPositioned(m);
+    const east = corner.includes("e");
+    const north = corner.includes("n");
+    // A centred object grows on both sides, so the width changes twice as fast as the pointer moves
+    const factor = !positioned && mediaAlignment(m) === "center" ? 2 : 1;
+    const x0 = positioned ? m.offsetLeft : 0;
+    const y0 = positioned ? m.offsetTop : 0;
+    const maxW = positioned ? editor.clientWidth : contentWidth();
+    const startX = e.clientX;
+    const target = e.currentTarget;
+    target.setPointerCapture(e.pointerId);
+
+    const move = (ev) => {
+      const dx = ev.clientX - startX;
+      const w = Math.round(Math.min(maxW, Math.max(MIN_SIZE, r0.width + (east ? dx : -dx) * factor)));
+      m.style.width = w + "px";
+      if (positioned) {
+        // Keep the corner opposite the handle where it is
+        const h = r0.height * (w / r0.width);
+        if (!east) m.style.setProperty("--x", Math.round(x0 + (r0.width - w)) + "px");
+        if (north) m.style.setProperty("--y", Math.round(y0 + (r0.height - h)) + "px");
+      }
+      refreshObjectUI();
+    };
+    const up = () => {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+      target.removeEventListener("pointercancel", up);
+      recordMediaChange(before);
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+    target.addEventListener("pointercancel", up);
+  }
+
+  /* --- Moving, with snapping and alignment guides --- */
+
+  // Lines an object can snap to, in screen coordinates. "side" says which edge of the object matches.
+  function snapReference(m) {
+    const er = editor.getBoundingClientRect();
+    const cs = getComputedStyle(editor);
+    const pl = parseFloat(cs.paddingLeft);
+    const pr = parseFloat(cs.paddingRight);
+    const pt = parseFloat(cs.paddingTop);
+    const pb = parseFloat(cs.paddingBottom);
+
+    const xs = [
+      { v: er.left, side: "start", kind: "edge" },
+      { v: er.left + pl, side: "start", kind: "margin" },
+      { v: er.left + er.width / 2, side: "center", kind: "docCenter" },
+      { v: er.right - pr, side: "end", kind: "margin" },
+      { v: er.right, side: "end", kind: "edge" },
+    ];
+    const ys = [
+      { v: er.top, side: "start", kind: "edge" },
+      { v: er.top + pt, side: "start", kind: "margin" },
+      { v: er.top + pt + (er.height - pt - pb) / 2, side: "center", kind: "docCenter" },
+      { v: er.bottom - pb, side: "end", kind: "margin" },
+    ];
+
+    editor.querySelectorAll("img,video").forEach((o) => {
+      if (o === m) return;
+      const r = o.getBoundingClientRect();
+      const name = o.tagName === "IMG" ? "image" : "video";
+      xs.push(
+        { v: r.left, side: "start", kind: "object", name },
+        { v: r.left + r.width / 2, side: "center", kind: "object", name },
+        { v: r.right, side: "end", kind: "object", name }
+      );
+      ys.push(
+        { v: r.top, side: "start", kind: "object", name },
+        { v: r.top + r.height / 2, side: "center", kind: "object", name },
+        { v: r.bottom, side: "end", kind: "object", name }
+      );
+    });
+    return { xs, ys, er };
+  }
+
+  function snapAxis(edges, lines) {
+    let best = null;
+    lines.forEach((ln) => {
+      const d = ln.v - edges[ln.side];
+      if (Math.abs(d) <= SNAP_DISTANCE && (best === null || Math.abs(d) < Math.abs(best))) best = d;
+    });
+    if (best === null) return { delta: 0, hits: [] };
+    return { delta: best, hits: lines.filter((ln) => Math.abs(ln.v - (edges[ln.side] + best)) < 0.5) };
+  }
+
+  function clearGuides() {
+    guides.textContent = "";
+    chip.hidden = true;
+  }
+
+  function drawGuides(xHits, yHits, ref) {
+    guides.textContent = "";
+    const cr = canvas.getBoundingClientRect();
+
+    xHits.forEach((ln) => {
+      const g = el("div", "guide v");
+      g.style.left = ln.v - cr.left + canvas.scrollLeft + "px";
+      g.style.top = canvas.scrollTop + "px";
+      g.style.height = canvas.clientHeight + "px";
+      guides.appendChild(g);
+    });
+    yHits.forEach((ln) => {
+      const g = el("div", "guide h");
+      g.style.top = ln.v - cr.top + canvas.scrollTop + "px";
+      g.style.left = ref.er.left - cr.left + canvas.scrollLeft + "px";
+      g.style.width = ref.er.width + "px";
+      guides.appendChild(g);
+    });
+
+    const msgs = new Set();
+    const docX = xHits.some((h) => h.kind === "docCenter");
+    const docY = yHits.some((h) => h.kind === "docCenter");
+    if (docX && docY) msgs.add("Centered in document");
+    else if (docX) msgs.add("Centered horizontally");
+    else if (docY) msgs.add("Centered vertically");
+    [...xHits, ...yHits].forEach((h) => {
+      if (h.kind === "edge") msgs.add("At document edge");
+      else if (h.kind === "margin") msgs.add("At text margin");
+      else if (h.kind === "object") msgs.add((h.side === "center" ? "Centered with " : "Aligned with ") + h.name);
+    });
+
+    if (msgs.size) {
+      chip.textContent = [...msgs].join(" \u00b7 ");
+      chip.style.left = cr.left + cr.width / 2 + "px";
+      chip.style.top = cr.top + 12 + "px";
+      chip.hidden = false;
+    } else {
+      chip.hidden = true;
+    }
+  }
+
+  function startMove(e, m) {
+    e.preventDefault();
+    const before = snapshotMedia(m);
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const x0 = m.offsetLeft;
+    const y0 = m.offsetTop;
+    const r0 = m.getBoundingClientRect();
+    const ref = snapReference(m);
+    const target = e.target;
+    target.setPointerCapture(e.pointerId);
+
+    const move = (ev) => {
+      let dx = ev.clientX - startX;
+      let dy = ev.clientY - startY;
+      let xHits = [];
+      let yHits = [];
+      // Hold Alt to move without snapping
+      if (!ev.altKey) {
+        const sx = snapAxis(
+          { start: r0.left + dx, center: r0.left + r0.width / 2 + dx, end: r0.right + dx },
+          ref.xs
+        );
+        const sy = snapAxis(
+          { start: r0.top + dy, center: r0.top + r0.height / 2 + dy, end: r0.bottom + dy },
+          ref.ys
+        );
+        dx += sx.delta;
+        dy += sy.delta;
+        xHits = sx.hits;
+        yHits = sy.hits;
+      }
+      m.style.setProperty("--x", Math.round(x0 + dx) + "px");
+      m.style.setProperty("--y", Math.round(y0 + dy) + "px");
+      refreshObjectUI();
+      drawGuides(xHits, yHits, ref);
+    };
+    const up = () => {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+      target.removeEventListener("pointercancel", up);
+      clearGuides();
+      recordMediaChange(before);
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+    target.addEventListener("pointercancel", up);
+  }
+
+  moveSurface.addEventListener("pointerdown", (e) => {
+    if (e.button === 0 && selectedMedia) startMove(e, selectedMedia);
+  });
+
+  // Objects in front of the text can be dragged straight away
+  function isFrontHit(e) {
+    const t = e.target;
+    if (!isMedia(t) || layoutOf(t) !== "front") return false;
+    return !(t.tagName === "VIDEO" && t.getBoundingClientRect().bottom - e.clientY < 44);
+  }
+
+  editor.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || !isFrontHit(e)) return;
+    selectMedia(e.target);
+    startMove(e, e.target);
+  });
+  editor.addEventListener("mousedown", (e) => {
+    if (isFrontHit(e)) e.preventDefault();
+  });
+  editor.addEventListener("dragstart", (e) => {
+    if (isMedia(e.target) && isPositioned(e.target)) e.preventDefault();
+  });
+
+  // Arrow keys nudge a selected free object (hold Shift for bigger steps)
+  editor.addEventListener("keydown", (e) => {
+    const m = selectedMedia;
+    if (!m || !isPositioned(m) || e.ctrlKey || e.metaKey || e.altKey) return;
+    const step = e.shiftKey ? 10 : 1;
+    const dx = e.key === "ArrowRight" ? step : e.key === "ArrowLeft" ? -step : 0;
+    const dy = e.key === "ArrowDown" ? step : e.key === "ArrowUp" ? -step : 0;
+    if (!dx && !dy) return;
+    e.preventDefault();
+    const before = snapshotMedia(m);
+    m.style.setProperty("--x", m.offsetLeft + dx + "px");
+    m.style.setProperty("--y", m.offsetTop + dy + "px");
+    recordMediaChange(before);
+    refreshObjectUI();
+  });
+
   /* ---------- Title, status, lifecycle ---------- */
 
   function syncTitle() {
@@ -1281,7 +1848,7 @@
 
   editor.addEventListener("input", () => {
     ensureContent();
-    lastVideoInsert = null;
+    undoStack.length = 0;
     markDirty();
     updateStatus();
     queueOutline();
