@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- Encoding and viewport -->
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+
+  <!-- Title and description -->
+  <title>Untitled document - BeDocs</title>
+  <meta name="description" content="BeDocs is a simple, personal document editor. Write, format, and save documents as .bdoc files.">
+  <meta name="application-name" content="BeDocs">
+  <meta name="author" content="BeDocs">
+  <meta name="keywords" content="BeDocs, document editor, text editor, bdoc">
+
+  <!-- Personal tool: keep it out of search engines -->
+  <meta name="robots" content="noindex, nofollow">
+
+  <!-- Theme and color scheme -->
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f7f8fa" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1d2128" media="(prefers-color-scheme: dark)">
+
+  <!-- Favicon (inline SVG, replace with a real file later if desired) -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231f6f6b'/%3E%3Ctext x='32' y='45' font-family='Arial,sans-serif' font-size='40' font-weight='700' text-anchor='middle' fill='white'%3EB%3C/text%3E%3C/svg%3E">
+
+  <!-- Open Graph (useful if the link is ever previewed) -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="BeDocs">
+  <meta property="og:description" content="A simple, personal document editor.">
+  <meta property="og:site_name" content="BeDocs">
+
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <noscript>BeDocs requires JavaScript to run. Please enable it in your browser.</noscript>
+
+  <div id="app">
+    <header class="chrome">
+      <div class="titlebar">
+        <span class="brand">BeDocs</span>
+        <input id="doc-title" class="doc-title" type="text" value="Untitled document" spellcheck="false" autocomplete="off" aria-label="Document title">
+      </div>
+
+      <!-- Menus are built by app.js -->
+      <nav id="menubar" class="menubar" aria-label="Menu"></nav>
+
+      <div id="toolbar" class="toolbar" role="toolbar" aria-label="Formatting">
+        <div class="group">
+          <button type="button" class="tb" data-action="toggleOutline" data-icon="outline" title="Show or hide outline" aria-label="Show or hide outline" aria-pressed="true"></button>
+        </div>
+
+        <div class="group">
+          <button type="button" class="tb" data-action="undo" data-icon="undo" title="Undo" aria-label="Undo"></button>
+          <button type="button" class="tb" data-action="redo" data-icon="redo" title="Redo" aria-label="Redo"></button>
+        </div>
+
+        <div class="group">
+          <select id="block-style" class="tb-select" title="Paragraph style" aria-label="Paragraph style">
+            <option value="title">Title</option>
+            <option value="h1">Heading 1</option>
+            <option value="h2">Heading 2</option>
+            <option value="h3">Heading 3</option>
+            <option value="p">Normal text</option>
+          </select>
+          <select id="line-spacing" class="tb-select narrow" title="Line spacing" aria-label="Line spacing">
+            <option value="1">1.0</option>
+            <option value="1.15">1.15</option>
+            <option value="1.5">1.5</option>
+            <option value="2">2.0</option>
+          </select>
+        </div>
+
+        <div class="group">
+          <button type="button" class="tb glyph glyph-b" data-action="bold" title="Bold" aria-label="Bold">B</button>
+          <button type="button" class="tb glyph glyph-i" data-action="italic" title="Italic" aria-label="Italic">I</button>
+          <button type="button" class="tb glyph glyph-u" data-action="underline" title="Underline" aria-label="Underline">U</button>
+          <button type="button" class="tb glyph glyph-s" data-action="strike" title="Strikethrough" aria-label="Strikethrough">S</button>
+        </div>
+
+        <div class="group">
+          <button type="button" class="tb" data-action="alignLeft" data-icon="alignLeft" title="Align left" aria-label="Align left"></button>
+          <button type="button" class="tb" data-action="alignCenter" data-icon="alignCenter" title="Align center" aria-label="Align center"></button>
+          <button type="button" class="tb" data-action="alignRight" data-icon="alignRight" title="Align right" aria-label="Align right"></button>
+          <button type="button" class="tb" data-action="alignJustify" data-icon="alignJustify" title="Justify" aria-label="Justify"></button>
+        </div>
+
+        <div class="group">
+          <button type="button" class="tb" data-action="ul" data-icon="ul" title="Bulleted list" aria-label="Bulleted list"></button>
+          <button type="button" class="tb" data-action="ol" data-icon="ol" title="Numbered list" aria-label="Numbered list"></button>
+          <button type="button" class="tb" data-action="hr" data-icon="hr" title="Insert horizontal line" aria-label="Insert horizontal line"></button>
+          <button type="button" class="tb" data-action="insertImage" data-icon="image" title="Insert image" aria-label="Insert image"></button>
+          <button type="button" class="tb" data-action="insertVideo" data-icon="video" title="Insert video" aria-label="Insert video"></button>
+          <button type="button" class="tb" data-action="clear" data-icon="clear" title="Clear formatting" aria-label="Clear formatting"></button>
+        </div>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside id="outline" class="outline" aria-label="Document outline">
+        <div class="outline-head">
+          <span>Outline</span>
+          <button type="button" id="outline-close" class="tb small" data-icon="close" title="Hide outline" aria-label="Hide outline"></button>
+        </div>
+        <nav id="outline-body" class="outline-body" aria-label="Headings"></nav>
+      </aside>
+
+      <main id="canvas" class="canvas">
+        <article id="editor" class="page" contenteditable="true" spellcheck="true" role="textbox" aria-multiline="true" aria-label="Document"><p><br></p></article>
+      </main>
+    </div>
+
+    <footer id="status" class="status" aria-live="polite">
+      <span id="stat-count"></span>
+      <span id="stat-save"></span>
+    </footer>
+  </div>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
