@@ -1440,8 +1440,38 @@
       }
     }
 
+    if (goingFree) clampIntoDocument(m);
     recordMediaChange(before);
     refreshObjectUI();
+  }
+
+  // Free objects must stay inside the document area. Shrinks an oversized object and
+  // pulls one that sticks out back in. Returns true if anything changed.
+  function clampIntoDocument(m) {
+    if (!isPositioned(m)) return false;
+    const er = editor.getBoundingClientRect();
+    let r = m.getBoundingClientRect();
+    if (!r.width || !er.width) return false;
+    let changed = false;
+
+    if (r.width > er.width) {
+      m.style.width = Math.floor(er.width) + "px";
+      r = m.getBoundingClientRect();
+      changed = true;
+    }
+    let dx = 0;
+    let dy = 0;
+    if (r.left < er.left) dx = er.left - r.left;
+    else if (r.right > er.right) dx = er.right - r.right;
+    if (r.top < er.top) dy = er.top - r.top;
+    else if (r.bottom > er.bottom && r.height <= er.height) dy = er.bottom - r.bottom;
+
+    if (dx || dy) {
+      m.style.setProperty("--x", Math.round(m.offsetLeft + dx) + "px");
+      m.style.setProperty("--y", Math.round(m.offsetTop + dy) + "px");
+      changed = true;
+    }
+    return changed;
   }
 
   function applySizePreset(m, preset) {
@@ -1586,8 +1616,12 @@
   }, { passive: true });
 
   new ResizeObserver(() => refreshObjectUI()).observe(editor);
-  editor.addEventListener("load", refreshObjectUI, true);
-  editor.addEventListener("loadedmetadata", refreshObjectUI, true);
+  function onMediaLoaded(e) {
+    if (isMedia(e.target)) clampIntoDocument(e.target);
+    refreshObjectUI();
+  }
+  editor.addEventListener("load", onMediaLoaded, true);
+  editor.addEventListener("loadedmetadata", onMediaLoaded, true);
 
   /* --- Resizing --- */
 
@@ -1606,7 +1640,14 @@
     const factor = !positioned && mediaAlignment(m) === "center" ? 2 : 1;
     const x0 = positioned ? m.offsetLeft : 0;
     const y0 = positioned ? m.offsetTop : 0;
-    const maxW = positioned ? editor.clientWidth : contentWidth();
+    let maxW = contentWidth();
+    if (positioned) {
+      const er = editor.getBoundingClientRect();
+      const ratio = r0.height / r0.width;
+      const byX = east ? er.right - r0.left : r0.right - er.left;
+      const byY = (north ? r0.bottom - er.top : er.bottom - r0.top) / ratio;
+      maxW = Math.max(MIN_SIZE, Math.min(byX, byY));
+    }
     const startX = e.clientX;
     const target = e.currentTarget;
     target.setPointerCapture(e.pointerId);
@@ -1745,9 +1786,13 @@
     const target = e.target;
     target.setPointerCapture(e.pointerId);
 
+    const er = ref.er;
+    const clampX = (v) => Math.min(Math.max(v, er.left - r0.left), er.right - r0.right);
+    const clampY = (v) => Math.min(Math.max(v, er.top - r0.top), er.bottom - r0.bottom);
+
     const move = (ev) => {
-      let dx = ev.clientX - startX;
-      let dy = ev.clientY - startY;
+      let dx = clampX(ev.clientX - startX);
+      let dy = clampY(ev.clientY - startY);
       let xHits = [];
       let yHits = [];
       // Hold Alt to move without snapping
@@ -1760,8 +1805,8 @@
           { start: r0.top + dy, center: r0.top + r0.height / 2 + dy, end: r0.bottom + dy },
           ref.ys
         );
-        dx += sx.delta;
-        dy += sy.delta;
+        dx = clampX(dx + sx.delta);
+        dy = clampY(dy + sy.delta);
         xHits = sx.hits;
         yHits = sy.hits;
       }
@@ -1817,6 +1862,7 @@
     const before = snapshotMedia(m);
     m.style.setProperty("--x", m.offsetLeft + dx + "px");
     m.style.setProperty("--y", m.offsetTop + dy + "px");
+    clampIntoDocument(m);
     recordMediaChange(before);
     refreshObjectUI();
   });
@@ -1871,6 +1917,19 @@
       e.preventDefault();
       openFile();
     }
+  });
+
+  // Printing: hide the text cursor and any selection, then put them back afterwards
+  let editorWasFocused = false;
+
+  window.addEventListener("beforeprint", () => {
+    editorWasFocused = document.activeElement === editor;
+    if (editorWasFocused) editor.blur();
+    window.getSelection().removeAllRanges();
+  });
+
+  window.addEventListener("afterprint", () => {
+    if (editorWasFocused) focusEditor();
   });
 
   document.execCommand("defaultParagraphSeparator", false, "p");
