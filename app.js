@@ -697,6 +697,8 @@
     });
     if (found) found.classList.add("media-selected");
     selectedMedia = found;
+    // Selecting a free object also pulls it back in if it somehow ended up outside the document
+    if (found && isPositioned(found)) clampIntoDocument(found);
     refreshObjectUI();
   }
 
@@ -1496,13 +1498,15 @@
   canvas.appendChild(ui);
 
   const guides = el("div", "obj-guides");
+  const bounds = el("div", "obj-bounds");
+  bounds.hidden = true;
   const frame = el("div", "obj-frame");
   const moveSurface = el("div", "obj-move");
   const bar = el("div", "obj-bar");
   const chip = el("div", "snap-chip");
   chip.hidden = true;
   frame.appendChild(moveSurface);
-  ui.append(guides, frame, bar);
+  ui.append(bounds, guides, frame, bar);
   document.body.appendChild(chip);
 
   const handleEls = {};
@@ -1615,7 +1619,20 @@
     if (selectedMedia) refreshObjectUI();
   }, { passive: true });
 
-  new ResizeObserver(() => refreshObjectUI()).observe(editor);
+  function clampAllFree() {
+    editor.querySelectorAll('[data-layout="behind"],[data-layout="front"]').forEach(clampIntoDocument);
+  }
+
+  let clampQueued = false;
+  new ResizeObserver(() => {
+    if (clampQueued) return;
+    clampQueued = true;
+    requestAnimationFrame(() => {
+      clampQueued = false;
+      clampAllFree();
+      refreshObjectUI();
+    });
+  }).observe(editor);
   function onMediaLoaded(e) {
     if (isMedia(e.target)) clampIntoDocument(e.target);
     refreshObjectUI();
@@ -1651,6 +1668,7 @@
     const startX = e.clientX;
     const target = e.currentTarget;
     target.setPointerCapture(e.pointerId);
+    showBounds();
 
     const move = (ev) => {
       const dx = ev.clientX - startX;
@@ -1661,6 +1679,7 @@
         const h = r0.height * (w / r0.width);
         if (!east) m.style.setProperty("--x", Math.round(x0 + (r0.width - w)) + "px");
         if (north) m.style.setProperty("--y", Math.round(y0 + (r0.height - h)) + "px");
+        clampIntoDocument(m);
       }
       refreshObjectUI();
     };
@@ -1668,6 +1687,8 @@
       target.removeEventListener("pointermove", move);
       target.removeEventListener("pointerup", up);
       target.removeEventListener("pointercancel", up);
+      hideBounds();
+      clampIntoDocument(m);
       recordMediaChange(before);
     };
     target.addEventListener("pointermove", move);
@@ -1733,6 +1754,21 @@
     chip.hidden = true;
   }
 
+  // Shows the area an object is allowed to stay in while it is being dragged or resized
+  function showBounds() {
+    const cr = canvas.getBoundingClientRect();
+    const er = editor.getBoundingClientRect();
+    bounds.style.left = er.left - cr.left + canvas.scrollLeft + "px";
+    bounds.style.top = er.top - cr.top + canvas.scrollTop + "px";
+    bounds.style.width = er.width + "px";
+    bounds.style.height = er.height + "px";
+    bounds.hidden = false;
+  }
+
+  function hideBounds() {
+    bounds.hidden = true;
+  }
+
   function drawGuides(xHits, yHits, ref) {
     guides.textContent = "";
     const cr = canvas.getBoundingClientRect();
@@ -1785,6 +1821,7 @@
     const ref = snapReference(m);
     const target = e.target;
     target.setPointerCapture(e.pointerId);
+    showBounds();
 
     const er = ref.er;
     const clampX = (v) => Math.min(Math.max(v, er.left - r0.left), er.right - r0.right);
@@ -1812,6 +1849,7 @@
       }
       m.style.setProperty("--x", Math.round(x0 + dx) + "px");
       m.style.setProperty("--y", Math.round(y0 + dy) + "px");
+      clampIntoDocument(m);
       refreshObjectUI();
       drawGuides(xHits, yHits, ref);
     };
@@ -1820,6 +1858,8 @@
       target.removeEventListener("pointerup", up);
       target.removeEventListener("pointercancel", up);
       clearGuides();
+      hideBounds();
+      clampIntoDocument(m);
       recordMediaChange(before);
     };
     target.addEventListener("pointermove", move);
